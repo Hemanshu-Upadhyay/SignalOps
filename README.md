@@ -1,14 +1,14 @@
 # SignalOps
 
-Event-driven, multi-tenant SaaS backend (NestJS + Postgres + Redis/BullMQ) with configurable rules, notifications, and usage tracking. Architecture details live in `docs/architecture.md`.
+Event-driven, multi-tenant backend (NestJS + Postgres + Redis/BullMQ) for ingesting business events, evaluating tenant-specific rules, sending notifications, and tracking usage/billing.
 
-## What this is (and how it works)
+## Project Summary
 
-- Ingest tenant-scoped business events quickly via REST (`/api/events`) with API-key auth.
-- Store events with idempotency, enqueue them (BullMQ/Redis), then workers evaluate rules, send notifications, and track usage/billing counters.
-- Soft/hard limits per tenant protect the system; DLQ captures persistent failures.
+- **Goal**: Fast, reliable event ingestion with per-tenant isolation, async processing, and configurable actions.
+- **Core flow**: API receives events → stores/idempotent → enqueues → worker evaluates rules → notifications + usage counters.
+- **Ops**: Soft/hard limits, retries with backoff, DLQ for persistent failures.
 
-## Architecture at a glance
+## Architecture Diagram
 
 ```mermaid
 graph TD
@@ -22,55 +22,78 @@ graph TD
   Redis -.failures.-> DLQ[Dead Letter Queue]
 ```
 
+## Tech Decisions (why this stack)
+
+- **NestJS + TypeScript**: Structured modules, DI, and guards for JWT/API-key auth.
+  -. **Postgres**: Strong consistency and relational modeling with JSONB payload flexibility.
+- **Redis + BullMQ**: Lightweight, reliable queueing with retries/backoff and DLQ without microservice overhead.
+- **Modular monolith**: Shared codebase/DB, async isolation via queue; avoids premature microservices complexity.
+
+## API Endpoints (core)
+
+| Method | Path        | Auth               | Purpose                   |
+| ------ | ----------- | ------------------ | ------------------------- |
+| POST   | /api/events | x-api-key (header) | Ingest event (idempotent) |
+| GET    | /api/docs   | optional           | Swagger UI (JWT/API key)  |
+
+Payload for `/api/events`:
+
+```json
+{
+  "type": "user.signup",
+  "payload": { "email": "user@example.com" },
+  "source": "app",
+  "occurredAt": "2025-12-15T00:00:00Z"
+}
+```
+
 ## Getting Started
 
-1. Install dependencies: `npm install`
-2. Copy `env.sample` → `.env` and adjust secrets.
-3. Run services locally: `docker-compose up --build`
-4. Start API only: `npm run start:dev` (requires Postgres/Redis reachable)
-5. Start worker: `npm run worker`
+1. Install deps: `npm install`
+2. Env: copy `env.sample` to `.env`; set `DATABASE_URL` (with `sslmode=require` for Supabase) and `REDIS_HOST` (use `127.0.0.1` locally).
+3. Build: `npm run build`
+4. Run API: `npm run start:dev`
+5. Run worker: `npm run worker`
+6. Swagger: `http://localhost:3000/api/docs`
 
-## Key Endpoints
+### Seed (temporary, migrations pending)
 
-- `POST /api/events` — ingest events. Headers: `x-api-key`, optional `idempotency-key`. Body: `{ type, payload, source?, occurredAt? }`.
+```sql
+INSERT INTO tenants(id,slug,name,status,plan,"monthlySoftLimit","monthlyHardLimit")
+VALUES (gen_random_uuid(),'acme','Acme Inc','active','free',100000,120000)
+ON CONFLICT (slug) DO NOTHING;
 
-## Moduleş̌̌
+INSERT INTO api_keys(id,"keyHash","keyPrefix",label,scopes,"tenantId")
+VALUES (
+  gen_random_uuid(),
+  '$2a$12$6/BEeH39Jw5EpbWPIFiNxOq2/LONKgWDev/dUicvliI47gBP4q/we',
+  'test_api_key_807',
+  'seed key',
+  '{}',
+  (SELECT id FROM tenants WHERE slug='acme')
+);
+```
 
-- Auth (JWT + API keys), Events (ingestion + idempotency + enqueue), Rules (versioned JSON), Notifications (provider abstraction), Billing (usage counters), Queue (BullMQ).
+Test ingestion:
 
-## Testing / Quality
+```bash
+curl -X POST http://localhost:3000/api/events \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: test_api_key_8077c438f557" \
+  -d '{"type":"user.signup","payload":{"email":"user@example.com"}}'
+```
+
+## Quality Signals
 
 - Lint: `npm run lint`
 - Build: `npm run build`
+- CI: GitHub Actions (`.github/workflows/ci.yml`) runs lint + build.
+- Retry/DLQ: BullMQ with exponential backoff and dead-letter queue.
 
-## Manual Smoke Test
+## Roadmap
 
-1. Seed a tenant + API key (migrations pending):
-   - Generate key + hash: `node -e "const b=require('bcryptjs');const key='test_api_key_123';console.log({key,prefix:key.slice(0,16),hash:b.hashSync(key,12)});"`
-   - Insert into DB (example):
-     ```
-     INSERT INTO tenants(id,slug,name,status,plan,"monthlySoftLimit","monthlyHardLimit")
-     VALUES (gen_random_uuid(),'acme','Acme Inc','active','free',100000,120000);
-     INSERT INTO api_keys(id,"keyHash","keyPrefix",label,scopes,"tenantId")
-     VALUES (gen_random_uuid(),'<HASH>','<PREFIX>','seed key','{}',(SELECT id FROM tenants WHERE slug='acme'));
-     ```
-2. Run API and worker: `npm run start:dev` (or `npm start` after build) and `npm run worker` with `DATABASE_URL` set (Supabase: include `?sslmode=require`).
-3. Ingest event:
-   ```
-   curl -X POST http://localhost:3000/api/events \
-     -H "Content-Type: application/json" \
-     -H "x-api-key: test_api_key_123" \
-     -d '{"type":"user.signup","payload":{"email":"user@example.com"}}'
-   ```
-4. Swagger UI: `http://localhost:3000/api/docs` for interactive testing (JWT bearer + x-api-key supported).
-5. Check worker logs for rule/notification processing; failed jobs go to `events-dlq`.
-
-## Deployment
-
-- Dockerfile provided (multi-stage). Compose includes Postgres/Redis + worker.
-- GitHub Actions workflow `.github/workflows/ci.yml` runs lint/build.
-
-## Notes
-
-- Notification providers are stubbed; wire to real SMTP/Telegram/WhatsApp SDKs.
-- Add database migrations before production (TypeORM CLI or custom).
+- Add proper database migrations and seed scripts (remove manual SQL).
+- Implement real notification providers (SMTP/SES, Telegram, WhatsApp) with delivery status storage.
+- Add rate limiting middleware and richer rule operators/templates.
+- Optional: Bull Board UI for queue observability.
+- Expand tests (unit/e2e) and add metrics/alerts.
