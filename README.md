@@ -25,7 +25,7 @@ graph TD
 ## Tech Decisions (why this stack)
 
 - **NestJS + TypeScript**: Structured modules, DI, and guards for JWT/API-key auth.
-  -. **Postgres**: Strong consistency and relational modeling with JSONB payload flexibility.
+- **Postgres**: Strong consistency and relational modeling with JSONB payload flexibility.
 - **Redis + BullMQ**: Lightweight, reliable queueing with retries/backoff and DLQ without microservice overhead.
 - **Modular monolith**: Shared codebase/DB, async isolation via queue; avoids premature microservices complexity.
 
@@ -90,6 +90,16 @@ curl -X POST http://localhost:3000/api/events \
 - CI: GitHub Actions (`.github/workflows/ci.yml`) runs lint + build.
 - Retry/DLQ: BullMQ with exponential backoff and dead-letter queue.
 
+## Proof, Gaps, and How We’ll Show It
+
+- **Load under stress (planned)**: Add k6/Artillery script to drive 10k+ events/min; report queue depth, latency, and worker throughput; monitor Redis memory during spike.
+- **Failure exercises (planned)**: Chaos steps—kill worker mid-job; force provider failure to hit retries/DLQ; verify poisoned message isolation.
+- **Billing/idempotency**: Ingestion is idempotent on `(tenantId, idempotencyKey)`; usage increments happen post-processing. Next: add exactly-once billing test and crash/ retry accounting scenario.
+- **Tenant isolation**: Per-request tenant scoped via API key/JWT; all writes include `tenantId`. Next: add row-level policies or a global query filter to hard-enforce scoping and add a “no cross-tenant read” test.
+- **Rule engine safety**: Current JSON rules, equals matcher only. Next: define rule grammar, cap payload size/conditions, and add version-migration story.
+- **Observability (planned)**: Structured logging with correlation IDs, queue depth and failure-rate metrics, alerts on DLQ growth and soft/hard-limit breaches.
+- **Known limits / not suitable yet**: No migrations/seed automation; notification providers are stubs; no SLA-grade observability; billing not proven under partial failures.
+
 ## Roadmap
 
 - Add proper database migrations and seed scripts (remove manual SQL).
@@ -97,3 +107,15 @@ curl -X POST http://localhost:3000/api/events \
 - Add rate limiting middleware and richer rule operators/templates.
 - Optional: Bull Board UI for queue observability.
 - Expand tests (unit/e2e) and add metrics/alerts.
+
+## Decisions & Tradeoffs
+
+- Modular monolith over microservices to avoid premature ops overhead; async queues provide workload isolation without service sprawl.
+- BullMQ/Redis over Kafka for simpler ops at this scale; gains retries/backoff/DLQ with minimal infra.
+- Postgres over NoSQL to keep strong consistency for tenants/usage/billing while using JSONB for flexible payloads.
+- Not built (yet): provider delivery persistence, migrations automation, rich rule grammar, rate limiting, metrics/alerts—kept scope lean to ship core flow.
+- Known limits: single-region, no sharding/partitioning strategy implemented; notification providers are stubs.
+
+## Who this is for
+
+SignalOps is for SaaS teams that need reliable event ingestion, internal alerts, and usage-based accounting without over-engineering—fast to stand up, clear tenant isolation, and room to grow into fuller observability and delivery guarantees.
